@@ -12,6 +12,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Home
+import androidx.compose.material.icons.filled.List
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -34,12 +36,15 @@ data class Reminder(
     val targetEpochMilli: Long
 )
 
+enum class Screen { Home, All }
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
             My_AppTheme {
+                var currentScreen by remember { mutableStateOf(Screen.Home) }
                 var showAddDialog by remember { mutableStateOf(false) }
                 val context = LocalContext.current
                 val prefs = remember { context.getSharedPreferences("reminder_list_prefs", Context.MODE_PRIVATE) }
@@ -48,12 +53,7 @@ class MainActivity : ComponentActivity() {
                 var reminders by remember {
                     val savedString = prefs.getString("reminders", "") ?: ""
                     val initialList = if (savedString.isEmpty()) {
-                        // Default reminders if none saved
-                        listOf(
-                            createReminder("Hoover the stairs", Duration.ofDays(7).seconds),
-                            createReminder("Do 100 pushups", Duration.ofDays(1).seconds),
-                            createReminder("Drink water", Duration.ofHours(1).seconds)
-                        )
+                        emptyList()
                     } else {
                         parseReminders(savedString)
                     }
@@ -67,14 +67,40 @@ class MainActivity : ComponentActivity() {
 
                 Scaffold(
                     modifier = Modifier.fillMaxSize(),
+                    bottomBar = {
+                        NavigationBar {
+                            NavigationBarItem(
+                                icon = { Icon(Icons.Default.Home, contentDescription = "Home") },
+                                label = { Text("Home") },
+                                selected = currentScreen == Screen.Home,
+                                onClick = { currentScreen = Screen.Home }
+                            )
+                            NavigationBarItem(
+                                icon = { Icon(Icons.Default.List, contentDescription = "All") },
+                                label = { Text("All") },
+                                selected = currentScreen == Screen.All,
+                                onClick = { currentScreen = Screen.All }
+                            )
+                        }
+                    },
                     floatingActionButton = {
                         FloatingActionButton(onClick = { showAddDialog = true }) {
                             Icon(Icons.Default.Add, contentDescription = "Add Reminder")
                         }
                     }
                 ) { innerPadding ->
+                    val filteredReminders = if (currentScreen == Screen.Home) {
+                        reminders.filter { 
+                            val remaining = Duration.between(Instant.now(), Instant.ofEpochMilli(it.targetEpochMilli))
+                            remaining.toHours() < 24
+                        }
+                    } else {
+                        reminders
+                    }
+
                     ReminderList(
-                        reminders = reminders,
+                        title = if (currentScreen == Screen.Home) "Due Soon (<24h)" else "All Reminders",
+                        reminders = filteredReminders,
                         onDelete = { id -> reminders = reminders.filter { it.id != id } },
                         onReset = { id -> 
                             reminders = reminders.map { 
@@ -123,6 +149,7 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ReminderList(
+    title: String,
     reminders: List<Reminder>,
     onDelete: (String) -> Unit,
     onReset: (String) -> Unit,
@@ -135,7 +162,7 @@ fun ReminderList(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text("My Reminders", style = MaterialTheme.typography.headlineMedium)
+        Text(title, style = MaterialTheme.typography.headlineMedium)
         
         reminders.forEach { reminder ->
             ReminderCard(
