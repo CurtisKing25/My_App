@@ -96,9 +96,9 @@ class MainActivity : ComponentActivity() {
                         reminders.filter { 
                             val remaining = Duration.between(Instant.now(), Instant.ofEpochMilli(it.targetEpochMilli))
                             remaining.toHours() < 24
-                        }
+                        }.sortedBy { it.targetEpochMilli }
                     } else {
-                        reminders
+                        reminders.sortedBy { it.targetEpochMilli }
                     }
 
                     ReminderList(
