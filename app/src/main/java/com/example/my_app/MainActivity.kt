@@ -496,7 +496,7 @@ fun ReminderCard(
             Spacer(modifier = Modifier.height(8.dp))
             
             Text(
-                text = if (isExpired) "Time to ${reminder.label}!" else formatDuration(remaining),
+                text = if (isExpired) "Overdue by ${formatDuration(remaining, true)}" else formatDuration(remaining, false),
                 style = MaterialTheme.typography.bodyLarge,
                 color = if (isExpired) Color.Red else Color.Unspecified
             )
@@ -733,7 +733,7 @@ fun AddReminderDialog(
 }
 
 // Helper function to format the duration into a readable string
-fun formatDuration(duration: Duration): String {
+fun formatDuration(duration: Duration, isOverdue: Boolean): String {
     val totalSeconds = duration.abs().seconds
     val days = totalSeconds / 86400
     val hours = (totalSeconds / 3600) % 24
@@ -743,7 +743,8 @@ fun formatDuration(duration: Duration): String {
     return buildString {
         if (days > 0) append("${days}d ")
         if (hours > 0 || (days > 0)) append("${hours}h ")
-        append("${minutes}m ${seconds}s remaining")
+        append("${minutes}m ${seconds}s")
+        if (!isOverdue) append(" remaining")
     }
 }
 
