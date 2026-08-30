@@ -46,10 +46,12 @@ data class Reminder(
     val isRecurring: Boolean,
     val recurrenceValue: Int = 1,
     val recurrenceUnit: String = "Days",
-    val dayOfWeek: Int? = null // 1 = Monday, ..., 7 = Sunday
+    val dayOfWeek: Int? = null, // 1 = Monday, ..., 7 = Sunday
+    val targetHour: Int? = null,
+    val targetMinute: Int? = null
 )
 
-enum class Screen { Home, All, Settings }
+enum class Screen { Home, Overdue, All, Settings }
 
 @OptIn(ExperimentalMaterial3Api::class)
 class MainActivity : ComponentActivity() {
@@ -59,6 +61,7 @@ class MainActivity : ComponentActivity() {
         setContent {
             My_AppTheme {
                 var currentScreen by remember { mutableStateOf(Screen.Home) }
+                var editingReminder by remember { mutableStateOf<Reminder?>(null) }
                 var showAddDialog by remember { mutableStateOf(false) }
                 val context = LocalContext.current
                 val scope = rememberCoroutineScope()
@@ -124,7 +127,13 @@ class MainActivity : ComponentActivity() {
                         if (currentScreen != Screen.Settings) {
                             TopAppBar(
                                 title = { 
-                                    Text(if (currentScreen == Screen.Home) "Due Soon" else "All Reminders") 
+                                    Text(
+                                        when (currentScreen) {
+                                            Screen.Home -> "Due Soon"
+                                            Screen.Overdue -> "Overdue"
+                                            else -> "All Reminders"
+                                        }
+                                    ) 
                                 },
                                 actions = {
                                     IconButton(onClick = { currentScreen = Screen.Settings }) {
@@ -153,6 +162,25 @@ class MainActivity : ComponentActivity() {
                                     onClick = { currentScreen = Screen.Home }
                                 )
                                 NavigationBarItem(
+                                    icon = { 
+                                        BadgedBox(
+                                            badge = {
+                                                val overdueCount = reminders.count { 
+                                                    Instant.ofEpochMilli(it.targetEpochMilli).isBefore(Instant.now())
+                                                }
+                                                if (overdueCount > 0) {
+                                                    Badge { Text(overdueCount.toString()) }
+                                                }
+                                            }
+                                        ) {
+                                            Icon(Icons.Default.Warning, contentDescription = "Overdue")
+                                        }
+                                    },
+                                    label = { Text("Overdue") },
+                                    selected = currentScreen == Screen.Overdue,
+                                    onClick = { currentScreen = Screen.Overdue }
+                                )
+                                NavigationBarItem(
                                     icon = { Icon(Icons.Default.List, contentDescription = "All") },
                                     label = { Text("All") },
                                     selected = currentScreen == Screen.All,
@@ -178,19 +206,26 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         else -> {
-                            val filteredReminders = if (currentScreen == Screen.Home) {
-                                reminders.filter { 
-                                    val remaining = Duration.between(Instant.now(), Instant.ofEpochMilli(it.targetEpochMilli))
-                                    remaining.toHours() < 24
-                                }.sortedBy { it.targetEpochMilli }
-                            } else {
-                                reminders.sortedBy { it.targetEpochMilli }
+                            val filteredReminders = when (currentScreen) {
+                                Screen.Home -> {
+                                    reminders.filter { 
+                                        val remaining = Duration.between(Instant.now(), Instant.ofEpochMilli(it.targetEpochMilli))
+                                        remaining.toHours() < 24
+                                    }.sortedBy { it.targetEpochMilli }
+                                }
+                                Screen.Overdue -> {
+                                    reminders.filter { 
+                                        Instant.ofEpochMilli(it.targetEpochMilli).isBefore(Instant.now())
+                                    }.sortedBy { it.targetEpochMilli }
+                                }
+                                else -> reminders.sortedBy { it.targetEpochMilli }
                             }
 
                             ReminderList(
                                 title = "", // Title moved to TopAppBar
                                 reminders = filteredReminders,
                                 onDelete = { id -> reminders = reminders.filter { it.id != id } },
+                                onEdit = { reminder -> editingReminder = reminder },
                                 onReset = { id -> 
                                     reminders = reminders.mapNotNull { 
                                         if (it.id == id) {
@@ -208,24 +243,62 @@ class MainActivity : ComponentActivity() {
                         }
                     }
 
-                    if (showAddDialog) {
+                    if (showAddDialog || editingReminder != null) {
                         AddReminderDialog(
-                            onDismiss = { showAddDialog = false },
-                            onConfirm = { label, isRecurring, value, unit, dow, fixedTarget ->
+                            initialReminder = editingReminder,
+                            onDismiss = { 
+                                showAddDialog = false
+                                editingReminder = null
+                            },
+                            onConfirm = { label, isRecurring, value, unit, dow, targetTime, fixedTarget ->
                                 val target = fixedTarget ?: run {
                                     val now = ZonedDateTime.now()
+                                    var initial = now
                                     if (isRecurring && unit == "Weeks" && dow != null) {
-                                        var next = now.with(java.time.temporal.TemporalAdjusters.nextOrSame(DayOfWeek.of(dow)))
-                                        if (next.isBefore(now)) next = next.plusWeeks(1)
-                                        next.toInstant().toEpochMilli()
-                                    } else if (isRecurring && unit == "Months") {
-                                        now.plusMonths(value.toLong()).toInstant().toEpochMilli()
-                                    } else {
-                                        now.toInstant().toEpochMilli()
+                                        initial = now.with(java.time.temporal.TemporalAdjusters.nextOrSame(DayOfWeek.of(dow)))
+                                        if (initial.isBefore(now)) initial = initial.plusWeeks(1)
                                     }
+                                    
+                                    if (targetTime != null) {
+                                        initial = initial.withHour(targetTime.hour).withMinute(targetTime.minute).withSecond(0)
+                                        if (initial.isBefore(now)) {
+                                            initial = when (unit) {
+                                                "Days" -> initial.plusDays(1)
+                                                "Weeks" -> initial.plusWeeks(1)
+                                                "Months" -> initial.plusMonths(1)
+                                                else -> initial
+                                            }
+                                        }
+                                    }
+                                    initial.toInstant().toEpochMilli()
                                 }
-                                reminders = reminders + createReminder(label, isRecurring, value, unit, dow, target)
+
+                                val updatedReminder = if (editingReminder != null) {
+                                    editingReminder!!.copy(
+                                        label = label,
+                                        isRecurring = isRecurring,
+                                        recurrenceValue = value,
+                                        recurrenceUnit = unit,
+                                        dayOfWeek = dow,
+                                        targetHour = targetTime?.hour,
+                                        targetMinute = targetTime?.minute,
+                                        targetEpochMilli = target
+                                    )
+                                } else {
+                                    createReminder(
+                                        label, isRecurring, value, unit, dow, 
+                                        targetTime?.hour, targetTime?.minute, target
+                                    )
+                                }
+
+                                if (editingReminder != null) {
+                                    reminders = reminders.map { if (it.id == updatedReminder.id) updatedReminder else it }
+                                } else {
+                                    reminders = reminders + updatedReminder
+                                }
+                                
                                 showAddDialog = false
+                                editingReminder = null
                             }
                         )
                     }
@@ -237,16 +310,27 @@ class MainActivity : ComponentActivity() {
     private fun calculateNextOccurrence(reminder: Reminder): Long {
         val now = ZonedDateTime.now()
         val currentTarget = Instant.ofEpochMilli(reminder.targetEpochMilli).atZone(ZoneId.systemDefault())
-        val base = if (currentTarget.isBefore(now)) now else currentTarget
+        
+        var next = currentTarget
+        val value = reminder.recurrenceValue.toLong()
 
-        return when (reminder.recurrenceUnit) {
-            "Minutes" -> base.plusMinutes(reminder.recurrenceValue.toLong())
-            "Hours" -> base.plusHours(reminder.recurrenceValue.toLong())
-            "Days" -> base.plusDays(reminder.recurrenceValue.toLong())
-            "Weeks" -> base.plusWeeks(reminder.recurrenceValue.toLong())
-            "Months" -> base.plusMonths(reminder.recurrenceValue.toLong())
-            else -> base.plusDays(reminder.recurrenceValue.toLong())
-        }.toInstant().toEpochMilli()
+        do {
+            next = when (reminder.recurrenceUnit) {
+                "Minutes" -> next.plusMinutes(value)
+                "Hours" -> next.plusHours(value)
+                "Days" -> next.plusDays(value)
+                "Weeks" -> next.plusWeeks(value)
+                "Months" -> next.plusMonths(value)
+                else -> next.plusDays(value)
+            }
+            
+            // Re-apply the time constraint if it exists
+            if (reminder.targetHour != null && reminder.targetMinute != null) {
+                next = next.withHour(reminder.targetHour).withMinute(reminder.targetMinute).withSecond(0)
+            }
+        } while (!next.isAfter(now))
+
+        return next.toInstant().toEpochMilli()
     }
 
     private fun createReminder(
@@ -255,6 +339,8 @@ class MainActivity : ComponentActivity() {
         value: Int, 
         unit: String, 
         dow: Int?, 
+        hour: Int?,
+        minute: Int?,
         target: Long
     ): Reminder {
         return Reminder(
@@ -265,7 +351,9 @@ class MainActivity : ComponentActivity() {
             isRecurring = isRecurring,
             recurrenceValue = value,
             recurrenceUnit = unit,
-            dayOfWeek = dow
+            dayOfWeek = dow,
+            targetHour = hour,
+            targetMinute = minute
         )
     }
 }
@@ -331,6 +419,7 @@ fun ReminderList(
     title: String,
     reminders: List<Reminder>,
     onDelete: (String) -> Unit,
+    onEdit: (Reminder) -> Unit,
     onReset: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -347,6 +436,7 @@ fun ReminderList(
             ReminderCard(
                 reminder = reminder,
                 onDelete = { onDelete(reminder.id) },
+                onEdit = { onEdit(reminder) },
                 onReset = { onReset(reminder.id) }
             )
         }
@@ -357,6 +447,7 @@ fun ReminderList(
 fun ReminderCard(
     reminder: Reminder,
     onDelete: () -> Unit,
+    onEdit: () -> Unit,
     onReset: () -> Unit
 ) {
     var currentTime by remember { mutableStateOf(Instant.now()) }
@@ -382,7 +473,7 @@ fun ReminderCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                     Icon(
                         imageVector = if (reminder.isRecurring) Icons.Default.Refresh else Icons.Default.Event,
                         contentDescription = null,
@@ -392,8 +483,13 @@ fun ReminderCard(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(text = reminder.label, style = MaterialTheme.typography.titleLarge)
                 }
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray)
+                Row {
+                    IconButton(onClick = onEdit) {
+                        Icon(Icons.Default.Edit, contentDescription = "Edit", tint = Color.Gray)
+                    }
+                    IconButton(onClick = onDelete) {
+                        Icon(Icons.Default.Delete, contentDescription = "Delete", tint = Color.Gray)
+                    }
                 }
             }
             
@@ -420,30 +516,56 @@ fun ReminderCard(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddReminderDialog(
+    initialReminder: Reminder? = null,
     onDismiss: () -> Unit,
-    onConfirm: (String, Boolean, Int, String, Int?, Long?) -> Unit
+    onConfirm: (String, Boolean, Int, String, Int?, LocalTime?, Long?) -> Unit
 ) {
-    var label by remember { mutableStateOf("") }
-    var selectedTab by remember { mutableIntStateOf(0) } // 0 = Recurring, 1 = Due Date
+    var label by remember { mutableStateOf(initialReminder?.label ?: "") }
+    var selectedTab by remember { mutableIntStateOf(if (initialReminder?.isRecurring == false) 1 else 0) }
     
     // Recurring state
-    var amount by remember { mutableStateOf("") }
-    var unit by remember { mutableStateOf("Days") }
-    var selectedDow by remember { mutableStateOf<Int?>(null) }
+    var amount by remember { mutableStateOf(initialReminder?.recurrenceValue?.toString() ?: "") }
+    var unit by remember { mutableStateOf(initialReminder?.recurrenceUnit ?: "Days") }
+    var selectedDow by remember { mutableStateOf<Int?>(initialReminder?.dayOfWeek) }
     var expanded by remember { mutableStateOf(false) }
+    var showRecurringTimePicker by remember { mutableStateOf(false) }
+    var recurringTime by remember { 
+        mutableStateOf<LocalTime?>(
+            if (initialReminder?.targetHour != null) 
+                LocalTime.of(initialReminder.targetHour, initialReminder.targetMinute ?: 0)
+            else null
+        ) 
+    }
     
     // Due Date state
     var showDatePicker by remember { mutableStateOf(false) }
     var showTimePicker by remember { mutableStateOf(false) }
-    val datePickerState = rememberDatePickerState()
-    val timePickerState = rememberTimePickerState()
+    val datePickerState = rememberDatePickerState(
+        initialSelectedDateMillis = if (initialReminder?.isRecurring == false) initialReminder.targetEpochMilli else null
+    )
+    val timePickerState = rememberTimePickerState(
+        initialHour = if (initialReminder?.isRecurring == false) {
+            Instant.ofEpochMilli(initialReminder.targetEpochMilli).atZone(ZoneId.systemDefault()).hour
+        } else 0,
+        initialMinute = if (initialReminder?.isRecurring == false) {
+            Instant.ofEpochMilli(initialReminder.targetEpochMilli).atZone(ZoneId.systemDefault()).minute
+        } else 0
+    )
     
-    var selectedDateMillis by remember { mutableStateOf<Long?>(null) }
-    var selectedTime by remember { mutableStateOf<LocalTime?>(null) }
+    var selectedDateMillis by remember { 
+        mutableStateOf<Long?>(if (initialReminder?.isRecurring == false) initialReminder.targetEpochMilli else null) 
+    }
+    var selectedTime by remember { 
+        mutableStateOf<LocalTime?>(
+            if (initialReminder?.isRecurring == false) 
+                Instant.ofEpochMilli(initialReminder.targetEpochMilli).atZone(ZoneId.systemDefault()).toLocalTime()
+            else null
+        ) 
+    }
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("New Reminder") },
+        title = { Text(if (initialReminder == null) "New Reminder" else "Edit Reminder") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 OutlinedTextField(
@@ -512,6 +634,17 @@ fun AddReminderDialog(
                                 }
                             }
                         }
+
+                        // Time constraint for recurring tasks
+                        OutlinedButton(
+                            onClick = { showRecurringTimePicker = true },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            val timeText = recurringTime?.let { 
+                                it.format(DateTimeFormatter.ofPattern("hh:mm a"))
+                            } ?: "Set Preferred Time (Optional)"
+                            Text(timeText)
+                        }
                     }
                 } else {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -543,19 +676,19 @@ fun AddReminderDialog(
                     if (selectedTab == 0) {
                         val value = amount.toIntOrNull() ?: 0
                         if (value > 0) {
-                            onConfirm(label, true, value, unit, selectedDow, null)
+                            onConfirm(label, true, value, unit, selectedDow, recurringTime, null)
                         }
                     } else {
                         val date = selectedDateMillis?.let { Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate() }
                         val time = selectedTime ?: LocalTime.MIDNIGHT
                         if (date != null) {
                             val target = LocalDateTime.of(date, time).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                            onConfirm(label, false, 0, "", null, target)
+                            onConfirm(label, false, 0, "", null, time, target)
                         }
                     }
                 }
             ) {
-                Text("Add")
+                Text(if (initialReminder == null) "Add" else "Save")
             }
         },
         dismissButton = {
@@ -577,16 +710,24 @@ fun AddReminderDialog(
         }
     }
 
-    if (showTimePicker) {
+    // Reuse existing time picker logic for both tabs
+    if (showTimePicker || showRecurringTimePicker) {
+        val activePickerState = rememberTimePickerState()
         AlertDialog(
-            onDismissRequest = { showTimePicker = false },
+            onDismissRequest = { 
+                showTimePicker = false
+                showRecurringTimePicker = false
+            },
             confirmButton = {
                 TextButton(onClick = {
-                    selectedTime = LocalTime.of(timePickerState.hour, timePickerState.minute)
+                    val time = LocalTime.of(activePickerState.hour, activePickerState.minute)
+                    if (showTimePicker) selectedTime = time
+                    if (showRecurringTimePicker) recurringTime = time
                     showTimePicker = false
+                    showRecurringTimePicker = false
                 }) { Text("OK") }
             },
-            text = { TimePicker(state = timePickerState) }
+            text = { TimePicker(state = activePickerState) }
         )
     }
 }
