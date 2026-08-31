@@ -67,6 +67,9 @@ class MainActivity : ComponentActivity() {
                 var currentScreen by remember { mutableStateOf(Screen.Home) }
                 var editingReminder by remember { mutableStateOf<Reminder?>(null) }
                 var showAddDialog by remember { mutableStateOf(false) }
+                var searchQuery by remember { mutableStateOf("") }
+                var isSearchActive by remember { mutableStateOf(false) }
+                
                 val context = LocalContext.current
                 val scope = rememberCoroutineScope()
                 val snackbarHostState = remember { SnackbarHostState() }
@@ -131,15 +134,42 @@ class MainActivity : ComponentActivity() {
                         if (currentScreen != Screen.Settings) {
                             TopAppBar(
                                 title = { 
-                                    Text(
-                                        when (currentScreen) {
-                                            Screen.Home -> "Due Soon"
-                                            Screen.Overdue -> "Overdue"
-                                            else -> "All Reminders"
-                                        }
-                                    ) 
+                                    if (isSearchActive) {
+                                        TextField(
+                                            value = searchQuery,
+                                            onValueChange = { searchQuery = it },
+                                            placeholder = { Text("Filter tasks...") },
+                                            singleLine = true,
+                                            modifier = Modifier.fillMaxWidth(),
+                                            colors = TextFieldDefaults.colors(
+                                                focusedContainerColor = Color.Transparent,
+                                                unfocusedContainerColor = Color.Transparent,
+                                                disabledContainerColor = Color.Transparent,
+                                            )
+                                        )
+                                    } else {
+                                        Text(
+                                            when (currentScreen) {
+                                                Screen.Home -> "Due Soon"
+                                                Screen.Overdue -> "Overdue"
+                                                else -> "All Reminders"
+                                            }
+                                        )
+                                    }
                                 },
                                 actions = {
+                                    if (isSearchActive) {
+                                        IconButton(onClick = { 
+                                            isSearchActive = false
+                                            searchQuery = "" 
+                                        }) {
+                                            Icon(Icons.Default.Close, contentDescription = "Close Search")
+                                        }
+                                    } else {
+                                        IconButton(onClick = { isSearchActive = true }) {
+                                            Icon(Icons.Default.Search, contentDescription = "Search")
+                                        }
+                                    }
                                     IconButton(onClick = { currentScreen = Screen.Settings }) {
                                         Icon(Icons.Default.Settings, contentDescription = "Settings")
                                     }
@@ -210,7 +240,7 @@ class MainActivity : ComponentActivity() {
                             )
                         }
                         else -> {
-                            val filteredReminders = when (currentScreen) {
+                            val baseFiltered = when (currentScreen) {
                                 Screen.Home -> {
                                     reminders.filter { 
                                         val remaining = Duration.between(Instant.now(), Instant.ofEpochMilli(it.targetEpochMilli))
@@ -224,6 +254,8 @@ class MainActivity : ComponentActivity() {
                                 }
                                 else -> reminders.sortedBy { it.targetEpochMilli }
                             }
+
+                            val filteredReminders = applySearchFilter(baseFiltered, searchQuery)
 
                             ReminderList(
                                 title = "", // Title moved to TopAppBar
@@ -389,6 +421,33 @@ class MainActivity : ComponentActivity() {
             lastAttemptMillis = null,
             longestAttemptMillis = null
         )
+    }
+
+    private fun applySearchFilter(reminders: List<Reminder>, query: String): List<Reminder> {
+        if (query.isBlank()) return reminders
+
+        val trimmedQuery = query.trim()
+
+        // 1. Exact Substring Match (contains)
+        val exactMatches = reminders.filter { it.label.contains(trimmedQuery, ignoreCase = true) }
+        if (exactMatches.isNotEmpty()) return exactMatches
+
+        // 2. Fuzzy Match (characters appear in order)
+        return reminders.filter { fuzzyMatch(it.label, trimmedQuery) }
+    }
+
+    private fun fuzzyMatch(text: String, query: String): Boolean {
+        var tIdx = 0
+        var qIdx = 0
+        val t = text.lowercase()
+        val q = query.lowercase()
+        while (tIdx < t.length && qIdx < q.length) {
+            if (t[tIdx] == q[qIdx]) {
+                qIdx++
+            }
+            tIdx++
+        }
+        return qIdx == q.length
     }
 }
 
