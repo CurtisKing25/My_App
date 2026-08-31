@@ -35,6 +35,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.time.*
 import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.UUID
 
 @Serializable
@@ -48,7 +49,10 @@ data class Reminder(
     val recurrenceUnit: String = "Days",
     val dayOfWeek: Int? = null, // 1 = Monday, ..., 7 = Sunday
     val targetHour: Int? = null,
-    val targetMinute: Int? = null
+    val targetMinute: Int? = null,
+    val timerStartEpochMilli: Long? = null,
+    val lastAttemptMillis: Long? = null,
+    val longestAttemptMillis: Long? = null
 )
 
 enum class Screen { Home, Overdue, All, Settings }
@@ -226,12 +230,39 @@ class MainActivity : ComponentActivity() {
                                 reminders = filteredReminders,
                                 onDelete = { id -> reminders = reminders.filter { it.id != id } },
                                 onEdit = { reminder -> editingReminder = reminder },
+                                onToggleTimer = { id ->
+                                    reminders = reminders.map { 
+                                        if (it.id == id) {
+                                            if (it.timerStartEpochMilli == null) {
+                                                it.copy(timerStartEpochMilli = Instant.now().toEpochMilli())
+                                            } else {
+                                                val elapsed = Instant.now().toEpochMilli() - it.timerStartEpochMilli
+                                                it.copy(
+                                                    timerStartEpochMilli = null,
+                                                    lastAttemptMillis = elapsed,
+                                                    longestAttemptMillis = maxOf(elapsed, it.longestAttemptMillis ?: 0L)
+                                                )
+                                            }
+                                        } else it
+                                    }
+                                },
                                 onReset = { id -> 
                                     reminders = reminders.mapNotNull { 
                                         if (it.id == id) {
-                                            if (it.isRecurring) {
-                                                val nextTarget = calculateNextOccurrence(it)
-                                                it.copy(targetEpochMilli = nextTarget)
+                                            val now = Instant.now().toEpochMilli()
+                                            var updated = it
+                                            if (it.timerStartEpochMilli != null) {
+                                                val elapsed = now - it.timerStartEpochMilli
+                                                updated = it.copy(
+                                                    timerStartEpochMilli = null,
+                                                    lastAttemptMillis = elapsed,
+                                                    longestAttemptMillis = maxOf(elapsed, it.longestAttemptMillis ?: 0L)
+                                                )
+                                            }
+
+                                            if (updated.isRecurring) {
+                                                val nextTarget = calculateNextOccurrence(updated)
+                                                updated.copy(targetEpochMilli = nextTarget)
                                             } else {
                                                 null 
                                             }
@@ -353,7 +384,10 @@ class MainActivity : ComponentActivity() {
             recurrenceUnit = unit,
             dayOfWeek = dow,
             targetHour = hour,
-            targetMinute = minute
+            targetMinute = minute,
+            timerStartEpochMilli = null,
+            lastAttemptMillis = null,
+            longestAttemptMillis = null
         )
     }
 }
@@ -420,6 +454,7 @@ fun ReminderList(
     reminders: List<Reminder>,
     onDelete: (String) -> Unit,
     onEdit: (Reminder) -> Unit,
+    onToggleTimer: (String) -> Unit,
     onReset: (String) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -437,6 +472,7 @@ fun ReminderList(
                 reminder = reminder,
                 onDelete = { onDelete(reminder.id) },
                 onEdit = { onEdit(reminder) },
+                onToggleTimer = { onToggleTimer(reminder.id) },
                 onReset = { onReset(reminder.id) }
             )
         }
@@ -448,6 +484,7 @@ fun ReminderCard(
     reminder: Reminder,
     onDelete: () -> Unit,
     onEdit: () -> Unit,
+    onToggleTimer: () -> Unit,
     onReset: () -> Unit
 ) {
     var currentTime by remember { mutableStateOf(Instant.now()) }
@@ -500,6 +537,70 @@ fun ReminderCard(
                 style = MaterialTheme.typography.bodyLarge,
                 color = if (isExpired) Color.Red else Color.Unspecified
             )
+
+            // Timer / Stopwatch UI for recurring tasks
+            if (reminder.isRecurring) {
+                Spacer(modifier = Modifier.height(8.dp))
+                
+                // Show statistics if they exist
+                if (reminder.lastAttemptMillis != null || reminder.longestAttemptMillis != null) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        reminder.lastAttemptMillis?.let {
+                            Text(
+                                "Last: ${formatStopwatchDuration(it)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                        }
+                        reminder.longestAttemptMillis?.let {
+                            Text(
+                                "Longest: ${formatStopwatchDuration(it)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.secondary
+                            )
+                        }
+                    }
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Button(
+                        onClick = onToggleTimer,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (reminder.timerStartEpochMilli != null) 
+                                MaterialTheme.colorScheme.errorContainer 
+                            else MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = if (reminder.timerStartEpochMilli != null)
+                                MaterialTheme.colorScheme.onErrorContainer
+                            else MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    ) {
+                        val isRunning = reminder.timerStartEpochMilli != null
+                        Icon(
+                            if (isRunning) Icons.Default.Stop else Icons.Default.PlayArrow,
+                            contentDescription = null
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(if (isRunning) "Stop" else "Start Timer")
+                    }
+
+                    if (reminder.timerStartEpochMilli != null) {
+                        val elapsed = currentTime.toEpochMilli() - reminder.timerStartEpochMilli
+                        Text(
+                            text = formatStopwatchDuration(elapsed),
+                            style = MaterialTheme.typography.titleMedium,
+                            modifier = Modifier.padding(horizontal = 8.dp)
+                        )
+                    }
+                }
+            }
             
             Spacer(modifier = Modifier.height(12.dp))
             
@@ -746,5 +847,12 @@ fun formatDuration(duration: Duration, isOverdue: Boolean): String {
         append("${minutes}m ${seconds}s")
         if (!isOverdue) append(" remaining")
     }
+}
+
+fun formatStopwatchDuration(millis: Long): String {
+    val seconds = (millis / 1000) % 60
+    val minutes = (millis / (1000 * 60)) % 60
+    val hours = (millis / (1000 * 60 * 60))
+    return String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, minutes, seconds)
 }
 
