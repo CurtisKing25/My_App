@@ -260,6 +260,8 @@ class MainActivity : ComponentActivity() {
                             ReminderList(
                                 title = "", // Title moved to TopAppBar
                                 reminders = filteredReminders,
+                                showCapacityMeter = currentScreen == Screen.Home,
+                                allReminders = reminders, // Pass all for capacity calculation
                                 onDelete = { id -> reminders = reminders.filter { it.id != id } },
                                 onEdit = { reminder -> editingReminder = reminder },
                                 onToggleTimer = { id ->
@@ -511,11 +513,13 @@ fun SettingsScreen(
 fun ReminderList(
     title: String,
     reminders: List<Reminder>,
+    modifier: Modifier = Modifier,
+    showCapacityMeter: Boolean = false,
+    allReminders: List<Reminder> = emptyList(),
     onDelete: (String) -> Unit,
     onEdit: (Reminder) -> Unit,
     onToggleTimer: (String) -> Unit,
-    onReset: (String) -> Unit,
-    modifier: Modifier = Modifier
+    onReset: (String) -> Unit
 ) {
     Column(
         modifier = modifier
@@ -524,7 +528,13 @@ fun ReminderList(
             .verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        Text(title, style = MaterialTheme.typography.headlineMedium)
+        if (title.isNotEmpty()) {
+            Text(title, style = MaterialTheme.typography.headlineMedium)
+        }
+
+        if (showCapacityMeter) {
+            CapacityMeter(allReminders)
+        }
         
         reminders.forEach { reminder ->
             ReminderCard(
@@ -533,6 +543,62 @@ fun ReminderList(
                 onEdit = { onEdit(reminder) },
                 onToggleTimer = { onToggleTimer(reminder.id) },
                 onReset = { onReset(reminder.id) }
+            )
+        }
+    }
+}
+
+@Composable
+fun CapacityMeter(reminders: List<Reminder>) {
+    val endOfDay = ZonedDateTime.now().with(LocalTime.MAX).toInstant().toEpochMilli()
+    
+    val tasksToday = reminders.filter {
+        it.targetEpochMilli <= endOfDay
+    }
+    
+    val usedMillis = tasksToday.sumOf { 
+        it.longestAttemptMillis ?: (15 * 60 * 1000L) // Default 15 mins if no data
+    }
+    
+    val totalAvailableMillis = 16 * 60 * 60 * 1000L // 16 productive hours
+    val progress = (usedMillis.toFloat() / totalAvailableMillis).coerceIn(0f, 1f)
+    val freeMillis = maxOf(0, totalAvailableMillis - usedMillis)
+    
+    Card(
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f)
+        ),
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    "Free Time Today",
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+                Text(
+                    formatShortDuration(freeMillis),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = if (freeMillis < 3600000) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+                )
+            }
+            Spacer(modifier = Modifier.height(8.dp))
+            LinearProgressIndicator(
+                progress = { progress },
+                modifier = Modifier.fillMaxWidth().height(8.dp),
+                color = if (progress > 0.9f) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                trackColor = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.1f)
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                "Used ${formatShortDuration(usedMillis)} of 16h capacity",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSecondaryContainer
             )
         }
     }
@@ -913,5 +979,12 @@ fun formatStopwatchDuration(millis: Long): String {
     val minutes = (millis / (1000 * 60)) % 60
     val hours = (millis / (1000 * 60 * 60))
     return String.format(Locale.getDefault(), "%02d:%02d:%02d", hours, minutes, seconds)
+}
+
+fun formatShortDuration(millis: Long): String {
+    val totalSeconds = millis / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds / 60) % 60
+    return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
 }
 
