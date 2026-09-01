@@ -52,7 +52,8 @@ data class Reminder(
     val targetMinute: Int? = null,
     val timerStartEpochMilli: Long? = null,
     val lastAttemptMillis: Long? = null,
-    val longestAttemptMillis: Long? = null
+    val longestAttemptMillis: Long? = null,
+    val parentId: String? = null
 )
 
 enum class Screen { Home, Overdue, All, Settings }
@@ -281,16 +282,16 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 onReset = { id -> 
-                                    reminders = reminders.mapNotNull { 
-                                        if (it.id == id) {
+                                    reminders = reminders.mapNotNull { reminder ->
+                                        if (reminder.id == id || reminder.parentId == id) {
                                             val now = Instant.now().toEpochMilli()
-                                            var updated = it
-                                            if (it.timerStartEpochMilli != null) {
-                                                val elapsed = now - it.timerStartEpochMilli
-                                                updated = it.copy(
+                                            var updated = reminder
+                                            if (reminder.timerStartEpochMilli != null) {
+                                                val elapsed = now - reminder.timerStartEpochMilli
+                                                updated = reminder.copy(
                                                     timerStartEpochMilli = null,
                                                     lastAttemptMillis = elapsed,
-                                                    longestAttemptMillis = maxOf(elapsed, it.longestAttemptMillis ?: 0L)
+                                                    longestAttemptMillis = maxOf(elapsed, reminder.longestAttemptMillis ?: 0L)
                                                 )
                                             }
 
@@ -298,9 +299,9 @@ class MainActivity : ComponentActivity() {
                                                 val nextTarget = calculateNextOccurrence(updated)
                                                 updated.copy(targetEpochMilli = nextTarget)
                                             } else {
-                                                null 
+                                                if (reminder.id == id) null else updated 
                                             }
-                                        } else it
+                                        } else reminder
                                     }
                                 },
                                 modifier = Modifier.padding(innerPadding)
@@ -311,11 +312,12 @@ class MainActivity : ComponentActivity() {
                     if (showAddDialog || editingReminder != null) {
                         AddReminderDialog(
                             initialReminder = editingReminder,
+                            availableParents = reminders.filter { it.parentId == null && it.id != editingReminder?.id },
                             onDismiss = { 
                                 showAddDialog = false
                                 editingReminder = null
                             },
-                            onConfirm = { label, isRecurring, value, unit, dow, targetTime, fixedTarget ->
+                            onConfirm = { label, isRecurring, value, unit, dow, targetTime, parentId, fixedTarget ->
                                 val target = fixedTarget ?: run {
                                     val now = ZonedDateTime.now()
                                     var initial = now
@@ -347,12 +349,14 @@ class MainActivity : ComponentActivity() {
                                         dayOfWeek = dow,
                                         targetHour = targetTime?.hour,
                                         targetMinute = targetTime?.minute,
-                                        targetEpochMilli = target
+                                        targetEpochMilli = target,
+                                        parentId = parentId
                                     )
                                 } else {
                                     createReminder(
                                         label, isRecurring, value, unit, dow, 
-                                        targetTime?.hour, targetTime?.minute, target
+                                        targetTime?.hour, targetTime?.minute, target,
+                                        parentId = parentId
                                     )
                                 }
 
@@ -406,7 +410,8 @@ class MainActivity : ComponentActivity() {
         dow: Int?, 
         hour: Int?,
         minute: Int?,
-        target: Long
+        target: Long,
+        parentId: String? = null
     ): Reminder {
         return Reminder(
             id = UUID.randomUUID().toString(),
@@ -421,7 +426,8 @@ class MainActivity : ComponentActivity() {
             targetMinute = minute,
             timerStartEpochMilli = null,
             lastAttemptMillis = null,
-            longestAttemptMillis = null
+            longestAttemptMillis = null,
+            parentId = parentId
         )
     }
 
@@ -536,13 +542,48 @@ fun ReminderList(
             CapacityMeter(allReminders)
         }
         
-        reminders.forEach { reminder ->
+        // Group reminders by parentId
+        val parents = reminders.filter { it.parentId == null }
+        val subtasks = reminders.filter { it.parentId != null }
+        
+        parents.forEach { parent ->
             ReminderCard(
-                reminder = reminder,
-                onDelete = { onDelete(reminder.id) },
-                onEdit = { onEdit(reminder) },
-                onToggleTimer = { onToggleTimer(reminder.id) },
-                onReset = { onReset(reminder.id) }
+                reminder = parent,
+                onDelete = { onDelete(parent.id) },
+                onEdit = { onEdit(parent) },
+                onToggleTimer = { onToggleTimer(parent.id) },
+                onReset = { onReset(parent.id) }
+            )
+            
+            // Render subtasks immediately after parent
+            val childTasks = subtasks.filter { it.parentId == parent.id }
+            if (childTasks.isNotEmpty()) {
+                Column(
+                    modifier = Modifier.padding(start = 32.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    childTasks.forEach { child ->
+                        ReminderCard(
+                            reminder = child,
+                            onDelete = { onDelete(child.id) },
+                            onEdit = { onEdit(child) },
+                            onToggleTimer = { onToggleTimer(child.id) },
+                            onReset = { onReset(child.id) }
+                        )
+                    }
+                }
+            }
+        }
+
+        // Show orphaned subtasks if any (shouldn't happen with current UI)
+        val orphaned = subtasks.filter { child -> parents.none { it.id == child.parentId } }
+        orphaned.forEach { child ->
+            ReminderCard(
+                reminder = child,
+                onDelete = { onDelete(child.id) },
+                onEdit = { onEdit(child) },
+                onToggleTimer = { onToggleTimer(child.id) },
+                onReset = { onReset(child.id) }
             )
         }
     }
@@ -743,12 +784,17 @@ fun ReminderCard(
 @Composable
 fun AddReminderDialog(
     initialReminder: Reminder? = null,
+    availableParents: List<Reminder> = emptyList(),
     onDismiss: () -> Unit,
-    onConfirm: (String, Boolean, Int, String, Int?, LocalTime?, Long?) -> Unit
+    onConfirm: (String, Boolean, Int, String, Int?, LocalTime?, String?, Long?) -> Unit
 ) {
     var label by remember { mutableStateOf(initialReminder?.label ?: "") }
     var selectedTab by remember { mutableIntStateOf(if (initialReminder?.isRecurring == false) 1 else 0) }
     
+    // Parent Task state
+    var selectedParentId by remember { mutableStateOf(initialReminder?.parentId) }
+    var parentExpanded by remember { mutableStateOf(false) }
+
     // Recurring state
     var amount by remember { mutableStateOf(initialReminder?.recurrenceValue?.toString() ?: "") }
     var unit by remember { mutableStateOf(initialReminder?.recurrenceUnit ?: "Days") }
@@ -800,6 +846,38 @@ fun AddReminderDialog(
                     label = { Text("Task Label") },
                     modifier = Modifier.fillMaxWidth()
                 )
+
+                // Parent Selection
+                Box {
+                    OutlinedButton(
+                        onClick = { parentExpanded = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val parentName = availableParents.find { it.id == selectedParentId }?.label ?: "No Parent Task"
+                        Text("Group: $parentName")
+                    }
+                    DropdownMenu(
+                        expanded = parentExpanded,
+                        onDismissRequest = { parentExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("None") },
+                            onClick = { 
+                                selectedParentId = null
+                                parentExpanded = false 
+                            }
+                        )
+                        availableParents.forEach { parent ->
+                            DropdownMenuItem(
+                                text = { Text(parent.label) },
+                                onClick = {
+                                    selectedParentId = parent.id
+                                    parentExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
 
                 TabRow(selectedTabIndex = selectedTab) {
                     Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }) {
@@ -902,14 +980,14 @@ fun AddReminderDialog(
                     if (selectedTab == 0) {
                         val value = amount.toIntOrNull() ?: 0
                         if (value > 0) {
-                            onConfirm(label, true, value, unit, selectedDow, recurringTime, null)
+                            onConfirm(label, true, value, unit, selectedDow, recurringTime, selectedParentId, null)
                         }
                     } else {
                         val date = selectedDateMillis?.let { Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate() }
                         val time = selectedTime ?: LocalTime.MIDNIGHT
                         if (date != null) {
                             val target = LocalDateTime.of(date, time).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                            onConfirm(label, false, 0, "", null, time, target)
+                            onConfirm(label, false, 0, "", null, time, selectedParentId, target)
                         }
                     }
                 }
