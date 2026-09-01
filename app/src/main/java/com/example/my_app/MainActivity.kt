@@ -53,6 +53,7 @@ data class Reminder(
     val timerStartEpochMilli: Long? = null,
     val lastAttemptMillis: Long? = null,
     val longestAttemptMillis: Long? = null,
+    val estimatedMillis: Long? = null,
     val parentId: String? = null
 )
 
@@ -317,7 +318,7 @@ class MainActivity : ComponentActivity() {
                                 showAddDialog = false
                                 editingReminder = null
                             },
-                            onConfirm = { label, isRecurring, value, unit, dow, targetTime, parentId, fixedTarget ->
+                            onConfirm = { label, isRecurring, value, unit, dow, targetTime, estMillis, parentId, fixedTarget ->
                                 val target = fixedTarget ?: run {
                                     val now = ZonedDateTime.now()
                                     var initial = now
@@ -350,12 +351,14 @@ class MainActivity : ComponentActivity() {
                                         targetHour = targetTime?.hour,
                                         targetMinute = targetTime?.minute,
                                         targetEpochMilli = target,
+                                        estimatedMillis = estMillis,
                                         parentId = parentId
                                     )
                                 } else {
                                     createReminder(
                                         label, isRecurring, value, unit, dow, 
                                         targetTime?.hour, targetTime?.minute, target,
+                                        estimatedMillis = estMillis,
                                         parentId = parentId
                                     )
                                 }
@@ -411,6 +414,7 @@ class MainActivity : ComponentActivity() {
         hour: Int?,
         minute: Int?,
         target: Long,
+        estimatedMillis: Long? = null,
         parentId: String? = null
     ): Reminder {
         return Reminder(
@@ -427,6 +431,7 @@ class MainActivity : ComponentActivity() {
             timerStartEpochMilli = null,
             lastAttemptMillis = null,
             longestAttemptMillis = null,
+            estimatedMillis = estimatedMillis,
             parentId = parentId
         )
     }
@@ -598,7 +603,7 @@ fun CapacityMeter(reminders: List<Reminder>) {
     }
     
     val usedMillis = tasksToday.sumOf { 
-        it.longestAttemptMillis ?: (15 * 60 * 1000L) // Default 15 mins if no data
+        it.estimatedMillis ?: it.longestAttemptMillis ?: (15 * 60 * 1000L) // Priority: Estimated > Longest > 15m Default
     }
     
     val totalAvailableMillis = 16 * 60 * 60 * 1000L // 16 productive hours
@@ -786,7 +791,7 @@ fun AddReminderDialog(
     initialReminder: Reminder? = null,
     availableParents: List<Reminder> = emptyList(),
     onDismiss: () -> Unit,
-    onConfirm: (String, Boolean, Int, String, Int?, LocalTime?, String?, Long?) -> Unit
+    onConfirm: (String, Boolean, Int, String, Int?, LocalTime?, Long?, String?, Long?) -> Unit
 ) {
     var label by remember { mutableStateOf(initialReminder?.label ?: "") }
     var selectedTab by remember { mutableIntStateOf(if (initialReminder?.isRecurring == false) 1 else 0) }
@@ -794,6 +799,11 @@ fun AddReminderDialog(
     // Parent Task state
     var selectedParentId by remember { mutableStateOf(initialReminder?.parentId) }
     var parentExpanded by remember { mutableStateOf(false) }
+
+    // Estimated Duration state
+    var estimatedMinutes by remember { 
+        mutableStateOf(initialReminder?.estimatedMillis?.let { (it / 60000).toString() } ?: "") 
+    }
 
     // Recurring state
     var amount by remember { mutableStateOf(initialReminder?.recurrenceValue?.toString() ?: "") }
@@ -844,6 +854,14 @@ fun AddReminderDialog(
                     value = label,
                     onValueChange = { label = it },
                     label = { Text("Task Label") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = estimatedMinutes,
+                    onValueChange = { estimatedMinutes = it },
+                    label = { Text("Estimated Duration (Minutes)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                     modifier = Modifier.fillMaxWidth()
                 )
 
@@ -980,14 +998,16 @@ fun AddReminderDialog(
                     if (selectedTab == 0) {
                         val value = amount.toIntOrNull() ?: 0
                         if (value > 0) {
-                            onConfirm(label, true, value, unit, selectedDow, recurringTime, selectedParentId, null)
+                            val est = estimatedMinutes.toLongOrNull()?.let { it * 60000 }
+                            onConfirm(label, true, value, unit, selectedDow, recurringTime, est, selectedParentId, null)
                         }
                     } else {
                         val date = selectedDateMillis?.let { Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate() }
                         val time = selectedTime ?: LocalTime.MIDNIGHT
                         if (date != null) {
                             val target = LocalDateTime.of(date, time).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                            onConfirm(label, false, 0, "", null, time, selectedParentId, target)
+                            val est = estimatedMinutes.toLongOrNull()?.let { it * 60000 }
+                            onConfirm(label, false, 0, "", null, time, est, selectedParentId, target)
                         }
                     }
                 }
