@@ -238,6 +238,7 @@ class MainActivity : ComponentActivity() {
                             SettingsScreen(
                                 onExport = { exportLauncher.launch("reminders_backup.json") },
                                 onImport = { importLauncher.launch(arrayOf("application/json", "application/octet-stream")) },
+                                prefs = prefs,
                                 modifier = Modifier.padding(innerPadding)
                             )
                         }
@@ -264,6 +265,7 @@ class MainActivity : ComponentActivity() {
                                 reminders = filteredReminders,
                                 showCapacityMeter = currentScreen == Screen.Home,
                                 allReminders = reminders, // Pass all for capacity calculation
+                                prefs = prefs,
                                 onDelete = { id -> reminders = reminders.filter { it.id != id } },
                                 onEdit = { reminder -> editingReminder = reminder },
                                 onToggleTimer = { id ->
@@ -464,18 +466,70 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     onExport: () -> Unit,
     onImport: () -> Unit,
+    prefs: android.content.SharedPreferences,
     modifier: Modifier = Modifier
 ) {
+    var showWakePicker by remember { mutableStateOf(false) }
+    var showSleepPicker by remember { mutableStateOf(false) }
+    
+    val wakeHour = prefs.getInt("wake_hour", 7)
+    val wakeMinute = prefs.getInt("wake_minute", 0)
+    val sleepHour = prefs.getInt("sleep_hour", 23)
+    val sleepMinute = prefs.getInt("sleep_minute", 0)
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        Text("Daily Schedule", style = MaterialTheme.typography.titleLarge)
+        
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("Wake Time", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            String.format(Locale.getDefault(), "%02d:%02d", wakeHour, wakeMinute),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Button(onClick = { showWakePicker = true }) {
+                        Text("Set")
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("Sleep Time", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            String.format(Locale.getDefault(), "%02d:%02d", sleepHour, sleepMinute),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Button(onClick = { showSleepPicker = true }) {
+                        Text("Set")
+                    }
+                }
+            }
+        }
+
         Text("Data Management", style = MaterialTheme.typography.titleLarge)
         
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -518,6 +572,35 @@ fun SettingsScreen(
             }
         }
     }
+
+    if (showWakePicker || showSleepPicker) {
+        val initialHour = if (showWakePicker) wakeHour else sleepHour
+        val initialMinute = if (showWakePicker) wakeMinute else sleepMinute
+        val timePickerState = rememberTimePickerState(initialHour, initialMinute, is24Hour = true)
+        
+        AlertDialog(
+            onDismissRequest = { 
+                showWakePicker = false
+                showSleepPicker = false
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    prefs.edit {
+                        if (showWakePicker) {
+                            putInt("wake_hour", timePickerState.hour)
+                            putInt("wake_minute", timePickerState.minute)
+                        } else {
+                            putInt("sleep_hour", timePickerState.hour)
+                            putInt("sleep_minute", timePickerState.minute)
+                        }
+                    }
+                    showWakePicker = false
+                    showSleepPicker = false
+                }) { Text("OK") }
+            },
+            text = { TimePicker(state = timePickerState) }
+        )
+    }
 }
 
 @Composable
@@ -527,6 +610,7 @@ fun ReminderList(
     modifier: Modifier = Modifier,
     showCapacityMeter: Boolean = false,
     allReminders: List<Reminder> = emptyList(),
+    prefs: android.content.SharedPreferences? = null,
     onDelete: (String) -> Unit,
     onEdit: (Reminder) -> Unit,
     onToggleTimer: (String) -> Unit,
@@ -543,8 +627,8 @@ fun ReminderList(
             Text(title, style = MaterialTheme.typography.headlineMedium)
         }
 
-        if (showCapacityMeter) {
-            CapacityMeter(allReminders)
+        if (showCapacityMeter && prefs != null) {
+            CapacityMeter(allReminders, prefs)
         }
         
         // Group reminders by parentId
@@ -595,8 +679,25 @@ fun ReminderList(
 }
 
 @Composable
-fun CapacityMeter(reminders: List<Reminder>) {
-    val endOfDay = ZonedDateTime.now().with(LocalTime.MAX).toInstant().toEpochMilli()
+fun CapacityMeter(reminders: List<Reminder>, prefs: android.content.SharedPreferences) {
+    val now = ZonedDateTime.now()
+    val endOfDay = now.with(LocalTime.MAX).toInstant().toEpochMilli()
+    
+    val wakeHour = prefs.getInt("wake_hour", 7)
+    val wakeMinute = prefs.getInt("wake_minute", 0)
+    val sleepHour = prefs.getInt("sleep_hour", 23)
+    val sleepMinute = prefs.getInt("sleep_minute", 0)
+
+    val wakeTimeToday = now.withHour(wakeHour).withMinute(wakeMinute).withSecond(0)
+    val sleepTimeToday = now.withHour(sleepHour).withMinute(sleepMinute).withSecond(0)
+    
+    // Remaining Capacity: from current time (or wake time if earlier) until sleep time.
+    val effectiveNow = if (now.isBefore(wakeTimeToday)) wakeTimeToday else if (now.isBefore(sleepTimeToday)) now else sleepTimeToday
+    val remainingMillis = Duration.between(effectiveNow, sleepTimeToday).toMillis()
+    
+    // Note: We may revisit "theoretical max" (total hours from wake to sleep) in a future point.
+    // For now, focusing on immediate pressure: what remains of my day vs what I have left to do.
+    val totalAvailableMillis = remainingMillis 
     
     val tasksToday = reminders.filter {
         it.targetEpochMilli <= endOfDay
@@ -606,8 +707,12 @@ fun CapacityMeter(reminders: List<Reminder>) {
         it.estimatedMillis ?: it.longestAttemptMillis ?: (15 * 60 * 1000L) // Priority: Estimated > Longest > 15m Default
     }
     
-    val totalAvailableMillis = 16 * 60 * 60 * 1000L // 16 productive hours
-    val progress = (usedMillis.toFloat() / totalAvailableMillis).coerceIn(0f, 1f)
+    val progress = if (totalAvailableMillis > 0) {
+        (usedMillis.toFloat() / totalAvailableMillis).coerceIn(0f, 1f)
+    } else {
+        1f
+    }
+    
     val freeMillis = maxOf(0, totalAvailableMillis - usedMillis)
     
     Card(
@@ -622,11 +727,18 @@ fun CapacityMeter(reminders: List<Reminder>) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    "Free Time Today",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                )
+                Column {
+                    Text(
+                        "Remaining Capacity",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                    Text(
+                        "Time now: ${now.format(DateTimeFormatter.ofPattern("hh:mm a"))}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+                    )
+                }
                 Text(
                     formatShortDuration(freeMillis),
                     style = MaterialTheme.typography.titleMedium,
@@ -642,7 +754,7 @@ fun CapacityMeter(reminders: List<Reminder>) {
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                "Used ${formatShortDuration(usedMillis)} of 16h capacity",
+                "Used ${formatShortDuration(usedMillis)} of ${formatShortDuration(totalAvailableMillis)} remaining",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer
             )
