@@ -52,7 +52,9 @@ data class Reminder(
     val targetMinute: Int? = null,
     val timerStartEpochMilli: Long? = null,
     val lastAttemptMillis: Long? = null,
-    val longestAttemptMillis: Long? = null
+    val longestAttemptMillis: Long? = null,
+    val estimatedMillis: Long? = null,
+    val parentId: String? = null
 )
 
 enum class Screen { Home, Overdue, All, Settings }
@@ -236,6 +238,7 @@ class MainActivity : ComponentActivity() {
                             SettingsScreen(
                                 onExport = { exportLauncher.launch("reminders_backup.json") },
                                 onImport = { importLauncher.launch(arrayOf("application/json", "application/octet-stream")) },
+                                prefs = prefs,
                                 modifier = Modifier.padding(innerPadding)
                             )
                         }
@@ -262,6 +265,7 @@ class MainActivity : ComponentActivity() {
                                 reminders = filteredReminders,
                                 showCapacityMeter = currentScreen == Screen.Home,
                                 allReminders = reminders, // Pass all for capacity calculation
+                                prefs = prefs,
                                 onDelete = { id -> reminders = reminders.filter { it.id != id } },
                                 onEdit = { reminder -> editingReminder = reminder },
                                 onToggleTimer = { id ->
@@ -281,16 +285,16 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 onReset = { id -> 
-                                    reminders = reminders.mapNotNull { 
-                                        if (it.id == id) {
+                                    reminders = reminders.mapNotNull { reminder ->
+                                        if (reminder.id == id || reminder.parentId == id) {
                                             val now = Instant.now().toEpochMilli()
-                                            var updated = it
-                                            if (it.timerStartEpochMilli != null) {
-                                                val elapsed = now - it.timerStartEpochMilli
-                                                updated = it.copy(
+                                            var updated = reminder
+                                            if (reminder.timerStartEpochMilli != null) {
+                                                val elapsed = now - reminder.timerStartEpochMilli
+                                                updated = reminder.copy(
                                                     timerStartEpochMilli = null,
                                                     lastAttemptMillis = elapsed,
-                                                    longestAttemptMillis = maxOf(elapsed, it.longestAttemptMillis ?: 0L)
+                                                    longestAttemptMillis = maxOf(elapsed, reminder.longestAttemptMillis ?: 0L)
                                                 )
                                             }
 
@@ -298,9 +302,9 @@ class MainActivity : ComponentActivity() {
                                                 val nextTarget = calculateNextOccurrence(updated)
                                                 updated.copy(targetEpochMilli = nextTarget)
                                             } else {
-                                                null 
+                                                if (reminder.id == id) null else updated 
                                             }
-                                        } else it
+                                        } else reminder
                                     }
                                 },
                                 modifier = Modifier.padding(innerPadding)
@@ -311,11 +315,12 @@ class MainActivity : ComponentActivity() {
                     if (showAddDialog || editingReminder != null) {
                         AddReminderDialog(
                             initialReminder = editingReminder,
+                            availableParents = reminders.filter { it.parentId == null && it.id != editingReminder?.id },
                             onDismiss = { 
                                 showAddDialog = false
                                 editingReminder = null
                             },
-                            onConfirm = { label, isRecurring, value, unit, dow, targetTime, fixedTarget ->
+                            onConfirm = { label, isRecurring, value, unit, dow, targetTime, estMillis, parentId, fixedTarget ->
                                 val target = fixedTarget ?: run {
                                     val now = ZonedDateTime.now()
                                     var initial = now
@@ -347,12 +352,16 @@ class MainActivity : ComponentActivity() {
                                         dayOfWeek = dow,
                                         targetHour = targetTime?.hour,
                                         targetMinute = targetTime?.minute,
-                                        targetEpochMilli = target
+                                        targetEpochMilli = target,
+                                        estimatedMillis = estMillis,
+                                        parentId = parentId
                                     )
                                 } else {
                                     createReminder(
                                         label, isRecurring, value, unit, dow, 
-                                        targetTime?.hour, targetTime?.minute, target
+                                        targetTime?.hour, targetTime?.minute, target,
+                                        estimatedMillis = estMillis,
+                                        parentId = parentId
                                     )
                                 }
 
@@ -406,7 +415,9 @@ class MainActivity : ComponentActivity() {
         dow: Int?, 
         hour: Int?,
         minute: Int?,
-        target: Long
+        target: Long,
+        estimatedMillis: Long? = null,
+        parentId: String? = null
     ): Reminder {
         return Reminder(
             id = UUID.randomUUID().toString(),
@@ -421,7 +432,9 @@ class MainActivity : ComponentActivity() {
             targetMinute = minute,
             timerStartEpochMilli = null,
             lastAttemptMillis = null,
-            longestAttemptMillis = null
+            longestAttemptMillis = null,
+            estimatedMillis = estimatedMillis,
+            parentId = parentId
         )
     }
 
@@ -453,18 +466,70 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
     onExport: () -> Unit,
     onImport: () -> Unit,
+    prefs: android.content.SharedPreferences,
     modifier: Modifier = Modifier
 ) {
+    var showWakePicker by remember { mutableStateOf(false) }
+    var showSleepPicker by remember { mutableStateOf(false) }
+    
+    val wakeHour = prefs.getInt("wake_hour", 7)
+    val wakeMinute = prefs.getInt("wake_minute", 0)
+    val sleepHour = prefs.getInt("sleep_hour", 23)
+    val sleepMinute = prefs.getInt("sleep_minute", 0)
+
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        Text("Daily Schedule", style = MaterialTheme.typography.titleLarge)
+        
+        Card(modifier = Modifier.fillMaxWidth()) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("Wake Time", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            String.format(Locale.getDefault(), "%02d:%02d", wakeHour, wakeMinute),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Button(onClick = { showWakePicker = true }) {
+                        Text("Set")
+                    }
+                }
+                
+                Spacer(modifier = Modifier.height(16.dp))
+                
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text("Sleep Time", style = MaterialTheme.typography.titleMedium)
+                        Text(
+                            String.format(Locale.getDefault(), "%02d:%02d", sleepHour, sleepMinute),
+                            style = MaterialTheme.typography.bodyMedium
+                        )
+                    }
+                    Button(onClick = { showSleepPicker = true }) {
+                        Text("Set")
+                    }
+                }
+            }
+        }
+
         Text("Data Management", style = MaterialTheme.typography.titleLarge)
         
         Card(modifier = Modifier.fillMaxWidth()) {
@@ -507,6 +572,35 @@ fun SettingsScreen(
             }
         }
     }
+
+    if (showWakePicker || showSleepPicker) {
+        val initialHour = if (showWakePicker) wakeHour else sleepHour
+        val initialMinute = if (showWakePicker) wakeMinute else sleepMinute
+        val timePickerState = rememberTimePickerState(initialHour, initialMinute, is24Hour = true)
+        
+        AlertDialog(
+            onDismissRequest = { 
+                showWakePicker = false
+                showSleepPicker = false
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    prefs.edit {
+                        if (showWakePicker) {
+                            putInt("wake_hour", timePickerState.hour)
+                            putInt("wake_minute", timePickerState.minute)
+                        } else {
+                            putInt("sleep_hour", timePickerState.hour)
+                            putInt("sleep_minute", timePickerState.minute)
+                        }
+                    }
+                    showWakePicker = false
+                    showSleepPicker = false
+                }) { Text("OK") }
+            },
+            text = { TimePicker(state = timePickerState) }
+        )
+    }
 }
 
 @Composable
@@ -516,6 +610,7 @@ fun ReminderList(
     modifier: Modifier = Modifier,
     showCapacityMeter: Boolean = false,
     allReminders: List<Reminder> = emptyList(),
+    prefs: android.content.SharedPreferences? = null,
     onDelete: (String) -> Unit,
     onEdit: (Reminder) -> Unit,
     onToggleTimer: (String) -> Unit,
@@ -532,36 +627,92 @@ fun ReminderList(
             Text(title, style = MaterialTheme.typography.headlineMedium)
         }
 
-        if (showCapacityMeter) {
-            CapacityMeter(allReminders)
+        if (showCapacityMeter && prefs != null) {
+            CapacityMeter(allReminders, prefs)
         }
         
-        reminders.forEach { reminder ->
+        // Group reminders by parentId
+        val parents = reminders.filter { it.parentId == null }
+        val subtasks = reminders.filter { it.parentId != null }
+        
+        parents.forEach { parent ->
             ReminderCard(
-                reminder = reminder,
-                onDelete = { onDelete(reminder.id) },
-                onEdit = { onEdit(reminder) },
-                onToggleTimer = { onToggleTimer(reminder.id) },
-                onReset = { onReset(reminder.id) }
+                reminder = parent,
+                onDelete = { onDelete(parent.id) },
+                onEdit = { onEdit(parent) },
+                onToggleTimer = { onToggleTimer(parent.id) },
+                onReset = { onReset(parent.id) }
+            )
+            
+            // Render subtasks immediately after parent
+            val childTasks = subtasks.filter { it.parentId == parent.id }
+            if (childTasks.isNotEmpty()) {
+                Column(
+                    modifier = Modifier.padding(start = 32.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    childTasks.forEach { child ->
+                        ReminderCard(
+                            reminder = child,
+                            onDelete = { onDelete(child.id) },
+                            onEdit = { onEdit(child) },
+                            onToggleTimer = { onToggleTimer(child.id) },
+                            onReset = { onReset(child.id) }
+                        )
+                    }
+                }
+            }
+        }
+
+        // Show orphaned subtasks if any (shouldn't happen with current UI)
+        val orphaned = subtasks.filter { child -> parents.none { it.id == child.parentId } }
+        orphaned.forEach { child ->
+            ReminderCard(
+                reminder = child,
+                onDelete = { onDelete(child.id) },
+                onEdit = { onEdit(child) },
+                onToggleTimer = { onToggleTimer(child.id) },
+                onReset = { onReset(child.id) }
             )
         }
     }
 }
 
 @Composable
-fun CapacityMeter(reminders: List<Reminder>) {
-    val endOfDay = ZonedDateTime.now().with(LocalTime.MAX).toInstant().toEpochMilli()
+fun CapacityMeter(reminders: List<Reminder>, prefs: android.content.SharedPreferences) {
+    val now = ZonedDateTime.now()
+    val endOfDay = now.with(LocalTime.MAX).toInstant().toEpochMilli()
+    
+    val wakeHour = prefs.getInt("wake_hour", 7)
+    val wakeMinute = prefs.getInt("wake_minute", 0)
+    val sleepHour = prefs.getInt("sleep_hour", 23)
+    val sleepMinute = prefs.getInt("sleep_minute", 0)
+
+    val wakeTimeToday = now.withHour(wakeHour).withMinute(wakeMinute).withSecond(0)
+    val sleepTimeToday = now.withHour(sleepHour).withMinute(sleepMinute).withSecond(0)
+    
+    // Remaining Capacity: from current time (or wake time if earlier) until sleep time.
+    val effectiveNow = if (now.isBefore(wakeTimeToday)) wakeTimeToday else if (now.isBefore(sleepTimeToday)) now else sleepTimeToday
+    val remainingMillis = Duration.between(effectiveNow, sleepTimeToday).toMillis()
+    
+    // Note: We may revisit "theoretical max" (total hours from wake to sleep) in a future point.
+    // For now, focusing on immediate pressure: what remains of my day vs what I have left to do.
+    val totalAvailableMillis = remainingMillis 
     
     val tasksToday = reminders.filter {
         it.targetEpochMilli <= endOfDay
     }
     
     val usedMillis = tasksToday.sumOf { 
-        it.longestAttemptMillis ?: (15 * 60 * 1000L) // Default 15 mins if no data
+        it.estimatedMillis ?: it.longestAttemptMillis ?: (15 * 60 * 1000L) // Priority: Estimated > Longest > 15m Default
     }
     
-    val totalAvailableMillis = 16 * 60 * 60 * 1000L // 16 productive hours
-    val progress = (usedMillis.toFloat() / totalAvailableMillis).coerceIn(0f, 1f)
+    val progress = if (totalAvailableMillis > 0) {
+        (usedMillis.toFloat() / totalAvailableMillis).coerceIn(0f, 1f)
+    } else {
+        1f
+    }
+    
     val freeMillis = maxOf(0, totalAvailableMillis - usedMillis)
     
     Card(
@@ -576,11 +727,18 @@ fun CapacityMeter(reminders: List<Reminder>) {
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    "Free Time Today",
-                    style = MaterialTheme.typography.titleSmall,
-                    color = MaterialTheme.colorScheme.onSecondaryContainer
-                )
+                Column {
+                    Text(
+                        "Remaining Capacity",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                    Text(
+                        "Time now: ${now.format(DateTimeFormatter.ofPattern("hh:mm a"))}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.7f)
+                    )
+                }
                 Text(
                     formatShortDuration(freeMillis),
                     style = MaterialTheme.typography.titleMedium,
@@ -596,7 +754,7 @@ fun CapacityMeter(reminders: List<Reminder>) {
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                "Used ${formatShortDuration(usedMillis)} of 16h capacity",
+                "Used ${formatShortDuration(usedMillis)} of ${formatShortDuration(totalAvailableMillis)} remaining",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSecondaryContainer
             )
@@ -743,12 +901,22 @@ fun ReminderCard(
 @Composable
 fun AddReminderDialog(
     initialReminder: Reminder? = null,
+    availableParents: List<Reminder> = emptyList(),
     onDismiss: () -> Unit,
-    onConfirm: (String, Boolean, Int, String, Int?, LocalTime?, Long?) -> Unit
+    onConfirm: (String, Boolean, Int, String, Int?, LocalTime?, Long?, String?, Long?) -> Unit
 ) {
     var label by remember { mutableStateOf(initialReminder?.label ?: "") }
     var selectedTab by remember { mutableIntStateOf(if (initialReminder?.isRecurring == false) 1 else 0) }
     
+    // Parent Task state
+    var selectedParentId by remember { mutableStateOf(initialReminder?.parentId) }
+    var parentExpanded by remember { mutableStateOf(false) }
+
+    // Estimated Duration state
+    var estimatedMinutes by remember { 
+        mutableStateOf(initialReminder?.estimatedMillis?.let { (it / 60000).toString() } ?: "") 
+    }
+
     // Recurring state
     var amount by remember { mutableStateOf(initialReminder?.recurrenceValue?.toString() ?: "") }
     var unit by remember { mutableStateOf(initialReminder?.recurrenceUnit ?: "Days") }
@@ -800,6 +968,46 @@ fun AddReminderDialog(
                     label = { Text("Task Label") },
                     modifier = Modifier.fillMaxWidth()
                 )
+
+                OutlinedTextField(
+                    value = estimatedMinutes,
+                    onValueChange = { estimatedMinutes = it },
+                    label = { Text("Estimated Duration (Minutes)") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Parent Selection
+                Box {
+                    OutlinedButton(
+                        onClick = { parentExpanded = true },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        val parentName = availableParents.find { it.id == selectedParentId }?.label ?: "No Parent Task"
+                        Text("Group: $parentName")
+                    }
+                    DropdownMenu(
+                        expanded = parentExpanded,
+                        onDismissRequest = { parentExpanded = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("None") },
+                            onClick = { 
+                                selectedParentId = null
+                                parentExpanded = false 
+                            }
+                        )
+                        availableParents.forEach { parent ->
+                            DropdownMenuItem(
+                                text = { Text(parent.label) },
+                                onClick = {
+                                    selectedParentId = parent.id
+                                    parentExpanded = false
+                                }
+                            )
+                        }
+                    }
+                }
 
                 TabRow(selectedTabIndex = selectedTab) {
                     Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }) {
@@ -902,14 +1110,16 @@ fun AddReminderDialog(
                     if (selectedTab == 0) {
                         val value = amount.toIntOrNull() ?: 0
                         if (value > 0) {
-                            onConfirm(label, true, value, unit, selectedDow, recurringTime, null)
+                            val est = estimatedMinutes.toLongOrNull()?.let { it * 60000 }
+                            onConfirm(label, true, value, unit, selectedDow, recurringTime, est, selectedParentId, null)
                         }
                     } else {
                         val date = selectedDateMillis?.let { Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate() }
                         val time = selectedTime ?: LocalTime.MIDNIGHT
                         if (date != null) {
                             val target = LocalDateTime.of(date, time).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                            onConfirm(label, false, 0, "", null, time, target)
+                            val est = estimatedMinutes.toLongOrNull()?.let { it * 60000 }
+                            onConfirm(label, false, 0, "", null, time, est, selectedParentId, target)
                         }
                     }
                 }
