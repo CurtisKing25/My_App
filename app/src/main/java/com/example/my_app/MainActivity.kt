@@ -47,7 +47,7 @@ data class Reminder(
     val isRecurring: Boolean,
     val recurrenceValue: Int = 1,
     val recurrenceUnit: String = "Days",
-    val dayOfWeek: Int? = null, // 1 = Monday, ..., 7 = Sunday
+    val daysOfWeek: List<Int> = emptyList(), // 1 = Monday, ..., 7 = Sunday
     val targetHour: Int? = null,
     val targetMinute: Int? = null,
     val timerStartEpochMilli: Long? = null,
@@ -81,7 +81,11 @@ class MainActivity : ComponentActivity() {
                 var reminders by remember {
                     val savedJson = prefs.getString("reminders_json", "") ?: ""
                     val initialList = try {
-                        if (savedJson.isEmpty()) emptyList() else Json.decodeFromString<List<Reminder>>(savedJson)
+                        val json = Json { 
+                            ignoreUnknownKeys = true 
+                            coerceInputValues = true
+                        }
+                        if (savedJson.isEmpty()) emptyList() else json.decodeFromString<List<Reminder>>(savedJson)
                     } catch (e: Exception) {
                         emptyList()
                     }
@@ -93,7 +97,11 @@ class MainActivity : ComponentActivity() {
                     contract = ActivityResultContracts.CreateDocument("application/json")
                 ) { uri ->
                     uri?.let {
-                        val jsonString = Json.encodeToString(reminders)
+                        val jsonString = Json { 
+                            ignoreUnknownKeys = true 
+                            prettyPrint = true
+                            encodeDefaults = true
+                        }.encodeToString(reminders)
                         context.contentResolver.openOutputStream(it)?.use { stream ->
                             stream.write(jsonString.toByteArray())
                         }
@@ -110,7 +118,11 @@ class MainActivity : ComponentActivity() {
                         context.contentResolver.openInputStream(it)?.use { stream ->
                             val jsonString = stream.bufferedReader().readText()
                             try {
-                                val importedList = Json.decodeFromString<List<Reminder>>(jsonString)
+                                val json = Json { 
+                                    ignoreUnknownKeys = true
+                                    coerceInputValues = true
+                                }
+                                val importedList = json.decodeFromString<List<Reminder>>(jsonString)
                                 reminders = importedList
                                 scope.launch {
                                     snackbarHostState.showSnackbar("Data imported successfully")
@@ -126,7 +138,11 @@ class MainActivity : ComponentActivity() {
 
                 // Save reminders whenever the list changes
                 LaunchedEffect(reminders) {
-                    prefs.edit { putString("reminders_json", Json.encodeToString(reminders)) }
+                    val json = Json { 
+                        ignoreUnknownKeys = true 
+                        encodeDefaults = true
+                    }
+                    prefs.edit { putString("reminders_json", json.encodeToString(reminders)) }
                 }
 
                 Scaffold(
@@ -331,33 +347,49 @@ class MainActivity : ComponentActivity() {
                                 showAddDialog = false
                                 editingReminder = null
                             },
-                            onConfirm = { label, isRecurring, value, unit, dow, targetTime, estMillis, parentId, fixedTarget ->
+                            onConfirm = { label, isRecurring, value, unit, dows, targetTime, estMillis, parentId, fixedTarget ->
                                 val parent = reminders.find { it.id == parentId }
                                 
                                 val target = if (parent != null) {
                                     parent.targetEpochMilli
                                 } else {
-                                    fixedTarget ?: run {
-                                        val now = ZonedDateTime.now()
-                                        var initial = now
-                                        if (isRecurring && unit == "Weeks" && dow != null) {
-                                            initial = now.with(java.time.temporal.TemporalAdjusters.nextOrSame(DayOfWeek.of(dow)))
-                                            if (initial.isBefore(now)) initial = initial.plusWeeks(1)
-                                        }
-                                        
-                                        if (targetTime != null) {
-                                            initial = initial.withHour(targetTime.hour).withMinute(targetTime.minute).withSecond(0)
-                                            if (initial.isBefore(now)) {
+                                    val startBase = fixedTarget?.let { Instant.ofEpochMilli(it).atZone(ZoneId.systemDefault()) } ?: ZonedDateTime.now()
+                                    var initial = startBase
+
+                                    if (isRecurring && unit == "Weeks" && dows.isNotEmpty()) {
+                                        // Find the earliest occurrence among all selected days
+                                        initial = dows.map { 
+                                            startBase.with(java.time.temporal.TemporalAdjusters.nextOrSame(DayOfWeek.of(it))) 
+                                        }.minBy { it.toInstant().toEpochMilli() }
+                                    }
+                                    
+                                    if (targetTime != null) {
+                                        initial = initial.withHour(targetTime.hour).withMinute(targetTime.minute).withSecond(0)
+                                        // If the calculated initial time is in the past, move it forward
+                                        if (initial.isBefore(ZonedDateTime.now())) {
+                                            if (isRecurring && unit == "Weeks" && dows.isNotEmpty()) {
+                                                val sortedDays = dows.sorted()
+                                                val currentDay = initial.dayOfWeek.value
+                                                val nextInList = sortedDays.find { it > currentDay }
+                                                initial = if (nextInList != null) {
+                                                    initial.with(java.time.temporal.TemporalAdjusters.next(DayOfWeek.of(nextInList)))
+                                                } else {
+                                                    initial.with(java.time.temporal.TemporalAdjusters.next(DayOfWeek.of(sortedDays.first())))
+                                                        .plusWeeks((value - 1).toLong())
+                                                }
+                                            } else {
                                                 initial = when (unit) {
                                                     "Days" -> initial.plusDays(1)
                                                     "Weeks" -> initial.plusWeeks(1)
                                                     "Months" -> initial.plusMonths(1)
+                                                    "Hours" -> initial.plusHours(1)
+                                                    "Minutes" -> initial.plusMinutes(1)
                                                     else -> initial
                                                 }
                                             }
                                         }
-                                        initial.toInstant().toEpochMilli()
                                     }
+                                    initial.toInstant().toEpochMilli()
                                 }
 
                                 val updatedReminder = if (editingReminder != null) {
@@ -366,7 +398,7 @@ class MainActivity : ComponentActivity() {
                                         isRecurring = if (parent != null) parent.isRecurring else isRecurring,
                                         recurrenceValue = if (parent != null) parent.recurrenceValue else value,
                                         recurrenceUnit = if (parent != null) parent.recurrenceUnit else unit,
-                                        dayOfWeek = if (parent != null) parent.dayOfWeek else dow,
+                                        daysOfWeek = if (parent != null) parent.daysOfWeek else dows,
                                         targetHour = if (parent != null) parent.targetHour else targetTime?.hour,
                                         targetMinute = if (parent != null) parent.targetMinute else targetTime?.minute,
                                         targetEpochMilli = target,
@@ -379,7 +411,7 @@ class MainActivity : ComponentActivity() {
                                         if (parent != null) parent.isRecurring else isRecurring,
                                         if (parent != null) parent.recurrenceValue else value,
                                         if (parent != null) parent.recurrenceUnit else unit,
-                                        if (parent != null) parent.dayOfWeek else dow,
+                                        if (parent != null) parent.daysOfWeek else dows,
                                         if (parent != null) parent.targetHour else targetTime?.hour,
                                         if (parent != null) parent.targetMinute else targetTime?.minute,
                                         target,
@@ -412,13 +444,26 @@ class MainActivity : ComponentActivity() {
         val value = reminder.recurrenceValue.toLong()
 
         do {
-            next = when (reminder.recurrenceUnit) {
-                "Minutes" -> next.plusMinutes(value)
-                "Hours" -> next.plusHours(value)
-                "Days" -> next.plusDays(value)
-                "Weeks" -> next.plusWeeks(value)
-                "Months" -> next.plusMonths(value)
-                else -> next.plusDays(value)
+            if (reminder.recurrenceUnit == "Weeks" && reminder.daysOfWeek.isNotEmpty()) {
+                val sortedDays = reminder.daysOfWeek.sorted()
+                val currentDay = next.dayOfWeek.value
+                val nextInList = sortedDays.find { it > currentDay }
+                
+                next = if (nextInList != null) {
+                    next.with(java.time.temporal.TemporalAdjusters.next(DayOfWeek.of(nextInList)))
+                } else {
+                    next.with(java.time.temporal.TemporalAdjusters.next(DayOfWeek.of(sortedDays.first())))
+                        .plusWeeks(value - 1)
+                }
+            } else {
+                next = when (reminder.recurrenceUnit) {
+                    "Minutes" -> next.plusMinutes(value)
+                    "Hours" -> next.plusHours(value)
+                    "Days" -> next.plusDays(value)
+                    "Weeks" -> next.plusWeeks(value)
+                    "Months" -> next.plusMonths(value)
+                    else -> next.plusDays(value)
+                }
             }
             
             // Re-apply the time constraint if it exists
@@ -435,7 +480,7 @@ class MainActivity : ComponentActivity() {
         isRecurring: Boolean, 
         value: Int, 
         unit: String, 
-        dow: Int?, 
+        dows: List<Int>, 
         hour: Int?,
         minute: Int?,
         target: Long,
@@ -450,7 +495,7 @@ class MainActivity : ComponentActivity() {
             isRecurring = isRecurring,
             recurrenceValue = value,
             recurrenceUnit = unit,
-            dayOfWeek = dow,
+            daysOfWeek = dows,
             targetHour = hour,
             targetMinute = minute,
             timerStartEpochMilli = null,
@@ -926,7 +971,7 @@ fun AddReminderDialog(
     initialReminder: Reminder? = null,
     availableParents: List<Reminder> = emptyList(),
     onDismiss: () -> Unit,
-    onConfirm: (String, Boolean, Int, String, Int?, LocalTime?, Long?, String?, Long?) -> Unit
+    onConfirm: (String, Boolean, Int, String, List<Int>, LocalTime?, Long?, String?, Long?) -> Unit
 ) {
     var label by remember { mutableStateOf(initialReminder?.label ?: "") }
     var selectedTab by remember { mutableIntStateOf(if (initialReminder?.isRecurring == false) 1 else 0) }
@@ -943,7 +988,7 @@ fun AddReminderDialog(
     // Recurring state
     var amount by remember { mutableStateOf(initialReminder?.recurrenceValue?.toString() ?: "") }
     var unit by remember { mutableStateOf(initialReminder?.recurrenceUnit ?: "Days") }
-    var selectedDow by remember { mutableStateOf<Int?>(initialReminder?.dayOfWeek) }
+    var selectedDows by remember { mutableStateOf(initialReminder?.daysOfWeek?.toSet() ?: emptySet<Int>()) }
     var expanded by remember { mutableStateOf(false) }
     var showRecurringTimePicker by remember { mutableStateOf(false) }
     var recurringTime by remember { 
@@ -1100,8 +1145,14 @@ fun AddReminderDialog(
                                 listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun").forEachIndexed { index, day ->
                                     val dow = index + 1
                                     FilterChip(
-                                        selected = selectedDow == dow,
-                                        onClick = { selectedDow = dow },
+                                        selected = selectedDows.contains(dow),
+                                        onClick = { 
+                                            selectedDows = if (selectedDows.contains(dow)) {
+                                                selectedDows - dow
+                                            } else {
+                                                selectedDows + dow
+                                            }
+                                        },
                                         label = { Text(day) }
                                     )
                                 }
@@ -1150,18 +1201,20 @@ fun AddReminderDialog(
 
                     if (selectedParentId != null) {
                         // Subtask: Timing is inherited, so we don't need to validate amount or date
-                        onConfirm(label, selectedTab == 0, 0, "", null, null, est, selectedParentId, null)
+                        onConfirm(label, selectedTab == 0, 0, "", emptyList(), null, est, selectedParentId, null)
                     } else if (selectedTab == 0) {
                         val value = amount.toIntOrNull() ?: 0
                         if (value > 0) {
-                            onConfirm(label, true, value, unit, selectedDow, recurringTime, est, null, null)
+                            val est = estimatedMinutes.toLongOrNull()?.let { it * 60000 }
+                            onConfirm(label, true, value, unit, selectedDows.toList(), recurringTime, est, selectedParentId, selectedDateMillis)
                         }
                     } else {
                         val date = selectedDateMillis?.let { Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate() }
                         val time = selectedTime ?: LocalTime.MIDNIGHT
                         if (date != null) {
                             val target = LocalDateTime.of(date, time).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                            onConfirm(label, false, 0, "", null, time, est, null, target)
+                            val est = estimatedMinutes.toLongOrNull()?.let { it * 60000 }
+                            onConfirm(label, false, 0, "", emptyList(), time, est, selectedParentId, target)
                         }
                     }
                 }
@@ -1209,6 +1262,7 @@ fun AddReminderDialog(
         )
     }
 }
+
 
 // Helper function to format the duration into a readable string
 fun formatDuration(duration: Duration, isOverdue: Boolean): String {
