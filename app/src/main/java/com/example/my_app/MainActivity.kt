@@ -202,7 +202,7 @@ class MainActivity : ComponentActivity() {
                                         BadgedBox(
                                             badge = {
                                                 val overdueCount = reminders.count { 
-                                                    Instant.ofEpochMilli(it.targetEpochMilli).isBefore(Instant.now())
+                                                    it.parentId == null && Instant.ofEpochMilli(it.targetEpochMilli).isBefore(Instant.now())
                                                 }
                                                 if (overdueCount > 0) {
                                                     Badge { Text(overdueCount.toString()) }
@@ -285,10 +285,15 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 onReset = { id -> 
+                                    val parent = reminders.find { it.id == id }
+                                    val nextTargetForParent = if (parent?.isRecurring == true) calculateNextOccurrence(parent) else null
+                                    
                                     reminders = reminders.mapNotNull { reminder ->
                                         if (reminder.id == id || reminder.parentId == id) {
                                             val now = Instant.now().toEpochMilli()
                                             var updated = reminder
+                                            
+                                            // Handle timer if running
                                             if (reminder.timerStartEpochMilli != null) {
                                                 val elapsed = now - reminder.timerStartEpochMilli
                                                 updated = reminder.copy(
@@ -299,9 +304,15 @@ class MainActivity : ComponentActivity() {
                                             }
 
                                             if (updated.isRecurring) {
-                                                val nextTarget = calculateNextOccurrence(updated)
-                                                updated.copy(targetEpochMilli = nextTarget)
+                                                // If it's a subtask being reset by parent, use parent's new target
+                                                val targetToUse = if (updated.parentId == id && nextTargetForParent != null) {
+                                                    nextTargetForParent
+                                                } else {
+                                                    calculateNextOccurrence(updated)
+                                                }
+                                                updated.copy(targetEpochMilli = targetToUse)
                                             } else {
+                                                // One-time task logic
                                                 if (reminder.id == id) null else updated 
                                             }
                                         } else reminder
@@ -321,45 +332,57 @@ class MainActivity : ComponentActivity() {
                                 editingReminder = null
                             },
                             onConfirm = { label, isRecurring, value, unit, dow, targetTime, estMillis, parentId, fixedTarget ->
-                                val target = fixedTarget ?: run {
-                                    val now = ZonedDateTime.now()
-                                    var initial = now
-                                    if (isRecurring && unit == "Weeks" && dow != null) {
-                                        initial = now.with(java.time.temporal.TemporalAdjusters.nextOrSame(DayOfWeek.of(dow)))
-                                        if (initial.isBefore(now)) initial = initial.plusWeeks(1)
-                                    }
-                                    
-                                    if (targetTime != null) {
-                                        initial = initial.withHour(targetTime.hour).withMinute(targetTime.minute).withSecond(0)
-                                        if (initial.isBefore(now)) {
-                                            initial = when (unit) {
-                                                "Days" -> initial.plusDays(1)
-                                                "Weeks" -> initial.plusWeeks(1)
-                                                "Months" -> initial.plusMonths(1)
-                                                else -> initial
+                                val parent = reminders.find { it.id == parentId }
+                                
+                                val target = if (parent != null) {
+                                    parent.targetEpochMilli
+                                } else {
+                                    fixedTarget ?: run {
+                                        val now = ZonedDateTime.now()
+                                        var initial = now
+                                        if (isRecurring && unit == "Weeks" && dow != null) {
+                                            initial = now.with(java.time.temporal.TemporalAdjusters.nextOrSame(DayOfWeek.of(dow)))
+                                            if (initial.isBefore(now)) initial = initial.plusWeeks(1)
+                                        }
+                                        
+                                        if (targetTime != null) {
+                                            initial = initial.withHour(targetTime.hour).withMinute(targetTime.minute).withSecond(0)
+                                            if (initial.isBefore(now)) {
+                                                initial = when (unit) {
+                                                    "Days" -> initial.plusDays(1)
+                                                    "Weeks" -> initial.plusWeeks(1)
+                                                    "Months" -> initial.plusMonths(1)
+                                                    else -> initial
+                                                }
                                             }
                                         }
+                                        initial.toInstant().toEpochMilli()
                                     }
-                                    initial.toInstant().toEpochMilli()
                                 }
 
                                 val updatedReminder = if (editingReminder != null) {
                                     editingReminder!!.copy(
                                         label = label,
-                                        isRecurring = isRecurring,
-                                        recurrenceValue = value,
-                                        recurrenceUnit = unit,
-                                        dayOfWeek = dow,
-                                        targetHour = targetTime?.hour,
-                                        targetMinute = targetTime?.minute,
+                                        isRecurring = if (parent != null) parent.isRecurring else isRecurring,
+                                        recurrenceValue = if (parent != null) parent.recurrenceValue else value,
+                                        recurrenceUnit = if (parent != null) parent.recurrenceUnit else unit,
+                                        dayOfWeek = if (parent != null) parent.dayOfWeek else dow,
+                                        targetHour = if (parent != null) parent.targetHour else targetTime?.hour,
+                                        targetMinute = if (parent != null) parent.targetMinute else targetTime?.minute,
                                         targetEpochMilli = target,
                                         estimatedMillis = estMillis,
                                         parentId = parentId
                                     )
                                 } else {
                                     createReminder(
-                                        label, isRecurring, value, unit, dow, 
-                                        targetTime?.hour, targetTime?.minute, target,
+                                        label, 
+                                        if (parent != null) parent.isRecurring else isRecurring,
+                                        if (parent != null) parent.recurrenceValue else value,
+                                        if (parent != null) parent.recurrenceUnit else unit,
+                                        if (parent != null) parent.dayOfWeek else dow,
+                                        if (parent != null) parent.targetHour else targetTime?.hour,
+                                        if (parent != null) parent.targetMinute else targetTime?.minute,
+                                        target,
                                         estimatedMillis = estMillis,
                                         parentId = parentId
                                     )
@@ -1010,15 +1033,31 @@ fun AddReminderDialog(
                 }
 
                 TabRow(selectedTabIndex = selectedTab) {
-                    Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }) {
+                    Tab(
+                        selected = selectedTab == 0, 
+                        onClick = { if (selectedParentId == null) selectedTab = 0 },
+                        enabled = selectedParentId == null
+                    ) {
                         Text("Recurring", modifier = Modifier.padding(8.dp))
                     }
-                    Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }) {
+                    Tab(
+                        selected = selectedTab == 1, 
+                        onClick = { if (selectedParentId == null) selectedTab = 1 },
+                        enabled = selectedParentId == null
+                    ) {
                         Text("Due Date", modifier = Modifier.padding(8.dp))
                     }
                 }
 
-                if (selectedTab == 0) {
+                if (selectedParentId != null) {
+                    Text(
+                        "Note: Schedule will be inherited from group",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.secondary
+                    )
+                }
+
+                if (selectedTab == 0 && selectedParentId == null) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
@@ -1080,7 +1119,7 @@ fun AddReminderDialog(
                             Text(timeText)
                         }
                     }
-                } else {
+                } else if (selectedParentId == null) {
                     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         OutlinedButton(
                             onClick = { showDatePicker = true },
@@ -1107,19 +1146,22 @@ fun AddReminderDialog(
                 onClick = {
                     if (label.isBlank()) return@TextButton
                     
-                    if (selectedTab == 0) {
+                    val est = estimatedMinutes.toLongOrNull()?.let { it * 60000 }
+
+                    if (selectedParentId != null) {
+                        // Subtask: Timing is inherited, so we don't need to validate amount or date
+                        onConfirm(label, selectedTab == 0, 0, "", null, null, est, selectedParentId, null)
+                    } else if (selectedTab == 0) {
                         val value = amount.toIntOrNull() ?: 0
                         if (value > 0) {
-                            val est = estimatedMinutes.toLongOrNull()?.let { it * 60000 }
-                            onConfirm(label, true, value, unit, selectedDow, recurringTime, est, selectedParentId, null)
+                            onConfirm(label, true, value, unit, selectedDow, recurringTime, est, null, null)
                         }
                     } else {
                         val date = selectedDateMillis?.let { Instant.ofEpochMilli(it).atZone(ZoneOffset.UTC).toLocalDate() }
                         val time = selectedTime ?: LocalTime.MIDNIGHT
                         if (date != null) {
                             val target = LocalDateTime.of(date, time).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
-                            val est = estimatedMinutes.toLongOrNull()?.let { it * 60000 }
-                            onConfirm(label, false, 0, "", null, time, est, selectedParentId, target)
+                            onConfirm(label, false, 0, "", null, time, est, null, target)
                         }
                     }
                 }
