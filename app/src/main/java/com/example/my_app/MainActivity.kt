@@ -684,6 +684,8 @@ fun ReminderList(
     onToggleTimer: (String) -> Unit,
     onReset: (String) -> Unit
 ) {
+    val expandedParentIds = remember { mutableStateMapOf<String, Boolean>() }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -704,17 +706,24 @@ fun ReminderList(
         val subtasks = reminders.filter { it.parentId != null }
         
         parents.forEach { parent ->
+            val childTasks = subtasks.filter { it.parentId == parent.id }
+            val isExpanded = expandedParentIds[parent.id] ?: false
+
             ReminderCard(
                 reminder = parent,
+                hasSubtasks = childTasks.isNotEmpty(),
+                isExpanded = isExpanded,
+                onToggleExpand = {
+                    expandedParentIds[parent.id] = !isExpanded
+                },
                 onDelete = { onDelete(parent.id) },
                 onEdit = { onEdit(parent) },
                 onToggleTimer = { onToggleTimer(parent.id) },
                 onReset = { onReset(parent.id) }
             )
             
-            // Render subtasks immediately after parent
-            val childTasks = subtasks.filter { it.parentId == parent.id }
-            if (childTasks.isNotEmpty()) {
+            // Render subtasks if expanded
+            if (isExpanded && childTasks.isNotEmpty()) {
                 Column(
                     modifier = Modifier.padding(start = 32.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -833,6 +842,9 @@ fun CapacityMeter(reminders: List<Reminder>, prefs: android.content.SharedPrefer
 @Composable
 fun ReminderCard(
     reminder: Reminder,
+    hasSubtasks: Boolean = false,
+    isExpanded: Boolean = false,
+    onToggleExpand: (() -> Unit)? = null,
     onDelete: () -> Unit,
     onEdit: () -> Unit,
     onToggleTimer: () -> Unit,
@@ -862,13 +874,23 @@ fun ReminderCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = if (reminder.isRecurring) Icons.Default.Refresh else Icons.Default.Event,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    if (hasSubtasks) {
+                        IconButton(onClick = onToggleExpand ?: {}) {
+                            Icon(
+                                imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.Menu,
+                                contentDescription = if (isExpanded) "Collapse" else "Expand Subtasks",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    } else {
+                        Icon(
+                            imageVector = if (reminder.isRecurring) Icons.Default.Refresh else Icons.Default.Event,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
                     Text(text = reminder.label, style = MaterialTheme.typography.titleLarge)
                 }
                 Row {
