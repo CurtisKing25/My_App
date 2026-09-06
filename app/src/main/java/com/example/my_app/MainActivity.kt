@@ -281,6 +281,7 @@ class MainActivity : ComponentActivity() {
                                 reminders = filteredReminders,
                                 showCapacityMeter = currentScreen == Screen.Home,
                                 allReminders = reminders, // Pass all for capacity calculation
+                                searchQuery = searchQuery,
                                 prefs = prefs,
                                 onDelete = { id -> reminders = reminders.filter { it.id != id } },
                                 onEdit = { reminder -> editingReminder = reminder },
@@ -510,13 +511,24 @@ class MainActivity : ComponentActivity() {
         if (query.isBlank()) return reminders
 
         val trimmedQuery = query.trim()
-
-        // 1. Exact Substring Match (contains)
-        val exactMatches = reminders.filter { it.label.contains(trimmedQuery, ignoreCase = true) }
-        if (exactMatches.isNotEmpty()) return exactMatches
-
-        // 2. Fuzzy Match (characters appear in order)
-        return reminders.filter { fuzzyMatch(it.label, trimmedQuery) }
+        
+        // 1. Collect all potential matches (direct or fuzzy)
+        val matches = reminders.filter { 
+            it.label.contains(trimmedQuery, ignoreCase = true) || fuzzyMatch(it.label, trimmedQuery)
+        }
+        
+        val matchingIds = matches.map { it.id }.toSet()
+        
+        // 2. Filter the master list:
+        // Include a task if it matches OR if it's a parent of something that matches
+        // OR if it's a child of something that matches (so expanding parent works)
+        return reminders.filter { task ->
+            task.id in matchingIds || 
+            reminders.any { other -> 
+                (other.parentId == task.id && other.id in matchingIds) || // Task is parent of a match
+                (task.parentId == other.id && other.id in matchingIds)    // Task is child of a match
+            }
+        }
     }
 
     private fun fuzzyMatch(text: String, query: String): Boolean {
@@ -678,12 +690,15 @@ fun ReminderList(
     modifier: Modifier = Modifier,
     showCapacityMeter: Boolean = false,
     allReminders: List<Reminder> = emptyList(),
+    searchQuery: String = "",
     prefs: android.content.SharedPreferences? = null,
     onDelete: (String) -> Unit,
     onEdit: (Reminder) -> Unit,
     onToggleTimer: (String) -> Unit,
     onReset: (String) -> Unit
 ) {
+    val expandedParentIds = remember { mutableStateMapOf<String, Boolean>() }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -700,26 +715,36 @@ fun ReminderList(
         }
         
         // Group reminders by parentId
+        // We use allReminders to determine the true structure, even when filtering
         val parents = reminders.filter { it.parentId == null }
-        val subtasks = reminders.filter { it.parentId != null }
+        val allSubtasks = allReminders.filter { it.parentId != null }
         
         parents.forEach { parent ->
+            // Check if this parent has ANY subtasks in the master list
+            val subtasksForThisParent = allSubtasks.filter { it.parentId == parent.id }
+            val hasSubtasks = subtasksForThisParent.isNotEmpty()
+            val isExpanded = expandedParentIds[parent.id] ?: false
+
             ReminderCard(
                 reminder = parent,
+                hasSubtasks = hasSubtasks,
+                isExpanded = isExpanded,
+                onToggleExpand = {
+                    expandedParentIds[parent.id] = !isExpanded
+                },
                 onDelete = { onDelete(parent.id) },
                 onEdit = { onEdit(parent) },
                 onToggleTimer = { onToggleTimer(parent.id) },
                 onReset = { onReset(parent.id) }
             )
             
-            // Render subtasks immediately after parent
-            val childTasks = subtasks.filter { it.parentId == parent.id }
-            if (childTasks.isNotEmpty()) {
+            // Render subtasks if expanded
+            if (isExpanded && hasSubtasks) {
                 Column(
                     modifier = Modifier.padding(start = 32.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    childTasks.forEach { child ->
+                    subtasksForThisParent.forEach { child ->
                         ReminderCard(
                             reminder = child,
                             onDelete = { onDelete(child.id) },
@@ -732,16 +757,26 @@ fun ReminderList(
             }
         }
 
-        // Show orphaned subtasks if any (shouldn't happen with current UI)
-        val orphaned = subtasks.filter { child -> parents.none { it.id == child.parentId } }
-        orphaned.forEach { child ->
-            ReminderCard(
-                reminder = child,
-                onDelete = { onDelete(child.id) },
-                onEdit = { onEdit(child) },
-                onToggleTimer = { onToggleTimer(child.id) },
-                onReset = { onReset(child.id) }
-            )
+        // Handle subtasks that matched the filter but whose parents didn't
+        // (These would otherwise disappear from view)
+        val filteredSubtasks = reminders.filter { it.parentId != null }
+        val orphanedSubtasks = filteredSubtasks.filter { child ->
+            parents.none { it.id == child.parentId }
+        }
+        
+        if (orphanedSubtasks.isNotEmpty()) {
+            if (parents.isNotEmpty()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+            }
+            orphanedSubtasks.forEach { child ->
+                ReminderCard(
+                    reminder = child,
+                    onDelete = { onDelete(child.id) },
+                    onEdit = { onEdit(child) },
+                    onToggleTimer = { onToggleTimer(child.id) },
+                    onReset = { onReset(child.id) }
+                )
+            }
         }
     }
 }
@@ -833,6 +868,9 @@ fun CapacityMeter(reminders: List<Reminder>, prefs: android.content.SharedPrefer
 @Composable
 fun ReminderCard(
     reminder: Reminder,
+    hasSubtasks: Boolean = false,
+    isExpanded: Boolean = false,
+    onToggleExpand: (() -> Unit)? = null,
     onDelete: () -> Unit,
     onEdit: () -> Unit,
     onToggleTimer: () -> Unit,
@@ -862,13 +900,23 @@ fun ReminderCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Row(modifier = Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        imageVector = if (reminder.isRecurring) Icons.Default.Refresh else Icons.Default.Event,
-                        contentDescription = null,
-                        modifier = Modifier.size(20.dp),
-                        tint = MaterialTheme.colorScheme.primary
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    if (hasSubtasks) {
+                        IconButton(onClick = onToggleExpand ?: {}) {
+                            Icon(
+                                imageVector = if (isExpanded) Icons.Default.ExpandLess else Icons.Default.Menu,
+                                contentDescription = if (isExpanded) "Collapse" else "Expand Subtasks",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    } else {
+                        Icon(
+                            imageVector = if (reminder.isRecurring) Icons.Default.Refresh else Icons.Default.Event,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
                     Text(text = reminder.label, style = MaterialTheme.typography.titleLarge)
                 }
                 Row {
